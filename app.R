@@ -2,9 +2,10 @@
 
 rm(list=ls())
 
-library(dplyr) # Data processing
-options(dplyr.summarise.inform = FALSE)
-library(ggplot2); theme_set(theme_classic()) # Data visualization
+library(dplyr); options(dplyr.summarise.inform = FALSE) # Data processing
+library(ggplot2) # Data visualization
+library(cowplot); theme_set(theme_classic()) # Additional ggplot functionality
+library(lemon) # Additional ggplot functionality
 library(tidyr) # Data processing
 # library(zoo) # needed for na.locf function
 # library(lemon) # needed for facet_rep_wrap/grid functions
@@ -14,21 +15,20 @@ library(shinydashboard) # shiny
 library(httr) # Needed for fetching URLs
 library(DT) # tabular data is rendered via DT
 library(shiny) # shiny
-library(shinyFiles)
-library(plotly)
-library(stringr)
+library(shinyFiles) # shiny file functionality
+library(plotly) # interactive plots
+library(stringr) # data wrangling
 # library(htmlwidgets)
 # library(shinyjs)
 # library(shinyWidgets)
-library(admisc)
+library(admisc) # data wrangling, specifically the numdec function
 
 {
   # install.packages("remotes")
   # remotes::install_github("https://github.com/ethanbass/chromConverter/")
 }
 
-library(chromConverter)
-library(plotly)
+library(chromConverter) # read and convert MS data
 
 # Peak finding/fitting functions lifted from Ethan Bass' chromatographR package. (https://ethanbass.github.io/chromatographR/)
 {
@@ -328,181 +328,6 @@ library(plotly)
   gcms_template_file = "C:/Box/Konecky Lab/Data/Agilent GC-MS (Bradley Lab Cyborg)/pared_down_data/gcms_template.xlsx"
 }
 
-ingest_function <- function(gcms_template_file) {
-  
-  # Read in the gcms_template file
-  {
-    sequence <- read_xlsx(gcms_template_file,sheet="sequence") %>% rename(line=injection)
-    comp_list <- read_excel(gcms_template_file,sheet="comp_list")
-    parameters <- read_excel(gcms_template_file,sheet="parameters")[,1:2] %>% spread(parameter,value) %>% 
-      type.convert(.,as.is=T) %>% # Very neat trick to coerce all columns to the variable type they look like.
-      mutate(rfs_spike_volume = ifelse(is.na(rfs_spike_volume),0,rfs_spike_volume))
-  }
-
-  # Look for ".D" files located in the same directory as the GCMS template file.
-  # Convert Hybrid MS Data to excel files containing one sheet each for Full Scan and SIM Scan data. 
-  # If exported data already exists, then skip the conversion.
-  {
-    files <- list.files(path=dirname(gcms_template_file),pattern=".D",full.names=T)
-    for(i in 1:length(files)){
-      if(!length(list.files(path=files[i],pattern="chrom_data.xlsx")) == 1)
-      {
-        rawdata <- read_chroms(files[i],format_in=parameters$format_in,format_out="data.frame")
-        fullscan <- rawdata[[1]]$MS1
-        simscan <- rawdata[[2]]$MS1
-        write_xlsx(list("full"=fullscan,"sim"=simscan),path=paste0(files[i],"/chrom_data.xlsx"))
-        rm(rawdata,fullscan,simscan)
-      }
-    }
-    rm(files,i)
-  }
-  
-  # Read back in the converted excel files.
-  {
-    files <- list.files(dirname(gcms_template_file),pattern="chrom_data.xlsx",recursive=T,full.names=T)
-    filenames <- basename(dirname(files))
-    
-    raw_full <- lapply(files,read_excel,sheet="full") # Read in files
-    raw_full <- setNames(raw_full,filenames) # Set injection name
-    raw_full <- bind_rows(raw_full,.id="injection") # Convert to a single data.frame
-    
-    raw_sim <- lapply(files,read_excel,sheet="sim")
-    raw_sim <- setNames(raw_sim,filenames)
-    raw_sim <- bind_rows(raw_sim,.id="injection")
-    
-    rawdata <- full_join(raw_full %>% mutate(scan_type = "full"),
-                         raw_sim %>% mutate(scan_type = "sim"))
-    
-    rm(files,filenames,raw_full,raw_sim)
-  }
-  
-  # Read and format metadata from the injection folders and template
-  {
-    # Get entered names for each injection
-    {
-      files <- list.files(dirname(gcms_template_file),pattern="runstart.txt",recursive=T,full.names=T)
-      filenames <- basename(dirname(files))
-      
-      gcms_names <- lapply(files,readLines) %>% 
-        setNames(filenames) %>% 
-        bind_rows(.id="injection") %>% 
-        gather(injection,runstart) %>% 
-        group_by(injection) %>% 
-        filter(grepl("dataname",runstart) & !grepl("dataname2",runstart)) %>% 
-        mutate(id1 = substr(runstart,gregexpr("= ",runstart)[[1]][1]+2,str_length(runstart))) %>% 
-        select(-runstart) %>% 
-        mutate(line = as.numeric(substr(injection,gregexpr("_",injection)[[1]][1]+1,gregexpr(".D",injection)[[1]][1]-1)))
-      
-      rm(files,filenames)
-    }
-    
-    # Grab the standards off the template's sequence sheet, match against chemstation data, and format relevant metadata.
-    standard_info <- sequence %>% 
-      mutate(id2 = suppressWarnings(as.numeric(id2))) %>% filter(!is.na(id2)) %>% 
-      mutate(dummy=T) %>% full_join(parameters %>% mutate(dummy=T),by="dummy") %>% 
-      full_join(comp_list %>% mutate(dummy=T),by="dummy",relationship = "many-to-many") %>% 
-      left_join(gcms_names,by=c("line","id1")) %>% 
-      select(line,injection,id1,id2,comp:mixed_stock_concentration,cal_curve_dilution_factor,cal_curve_volume,rfs_spike_volume,rt_window) %>% 
-      mutate(total_volume = cal_curve_volume + rfs_spike_volume,
-             initial_concentration = mixed_stock_concentration * cal_curve_volume / total_volume,
-             initial_concentration = ifelse(is.na(initial_concentration),0,initial_concentration),
-             curve_concentration = initial_concentration * cal_curve_dilution_factor^id2,
-             window_lower = rt-rt_window,
-             window_upper = rt+rt_window
-      )
-
-    # Do the same thing for samples
-    sample_info <- sequence %>% filter(grepl("sample",id2)) %>% 
-      mutate(dummy=T) %>% full_join(parameters %>% mutate(dummy=T),by="dummy") %>% 
-      left_join(gcms_names,by=c("line","id1")) %>% 
-      select(line,injection,id1:sample_mass_grams,rfs_spike_volume) %>% 
-      mutate(total_volume = volume + rfs_spike_volume)
-  }
-  
-  # Some simple summary info about our rawdata.
-  {
-    scan_info <- rawdata %>% 
-      group_by(scan_type) %>% 
-      mutate(min_mz = min(mz),
-             max_mz = max(mz)) %>% 
-      filter(rt < min(rt)+2) %>% 
-      group_by(scan_type,min_mz,max_mz) %>% 
-      summarize(resolution = numdec(mz)) %>% 
-      mutate(mz_string = paste0(min_mz,"-",max_mz))
-  }
-  
-  # Checks for problems
-  {
-    # check to see if any of our standard or sample entries in the 'sequence' sheet are missing a matching injection.
-    {
-      injection_sequence_matching <- bind_rows(standard_info %>% select(injection,id1),
-                                               sample_info %>% select(injection,id1)) %>% 
-        distinct() %>% 
-        mutate(id1 = ifelse(is.na(id1),"",id1)) %>% 
-        filter(is.na(injection)) %>% 
-        summarize(list = str_c(id1,collapse=" | ")) %>% 
-        .$list
-      
-      
-      
-      if(injection_sequence_matching > 1){
-        injection_sequence_error <- paste0("These id1 entries in the 'sequence' sheet have no matching injection sample name: ",injection_sequence_matching,
-                                           "\nSee GCMS Names output box for injection sample names to help find what is wrong.")
-      } else {injection_sequence_error = NULL}
-      
-
-    }
-    # check for empty data frames
-    {
-      empty_list <- data.frame("rawdata" = length(rawdata)==0,
-                               "scan_info" = length(scan_info)==0,
-                               "sample_info" = length(sample_info)==0,
-                               "standard_info" = length(standard_info)==0,
-                               "sequence" = length(sequence)==0,
-                               "comp_list" = length(comp_list)==0,
-                               "parameters" = length(parameters)==0,
-                               "gcms_names" = length(gcms_names)==0
-                         ) %>% 
-        gather(object,empty) %>% 
-        filter(empty == T) %>% 
-        summarize(list = str_c(object,collapse=" | "))
-      
-      if(empty_list != ""){
-        empty_list_error <- paste0("The following required objects are empty, indicating a problem during import and initial processing: ",empty_list,
-                                   "\nCheck that your template and exported GCMS data match examples or contact jackh@wustl.edu")
-      } else {empty_list_error = NULL}
-      
-      errors = c(injection_sequence_error,empty_list_error)
-        
-    }
-    
-    final_check = is.null(errors)
-
-  }
-  
-  
-  
-  if(final_check){
-    list("final_check" = final_check,
-         "errors" = errors,
-         "rawdata" = rawdata,
-         "scan_info" = scan_info,
-         "sample_info" = sample_info,
-         "standard_info" = standard_info,
-         "sequence" = sequence,
-         "comp_list" = comp_list,
-         "parameters" = parameters,
-         "gcms_names" = gcms_names)
-  } else if(!final_check){
-    list("final_check" = errors)
-    }
-}
-
-
-
-
-
-
 # UI
 {
     ui <- dashboardPage(
@@ -587,37 +412,43 @@ ingest_function <- function(gcms_template_file) {
                 ),
                 tabItem(tabName = "chromatogram_tab",
                         fluidPage(
-                        fluidRow(
-                            box(title = NULL,
-                                width = 6,
+                          fluidRow(
+                            box(title = "Injections to View",
+                                width = 4,
+                                style='overflow-x: scroll;height:200px;overflow-y: scroll;',
+                                collapsible = T,
                                 checkboxGroupInput("injection_selection",
-                                            label = "Select the injection to view:",
-                                            choices ="No data loaded")
+                                                   label = NULL,
+                                                   choices ="No data loaded")
                             ),
-                            box(title=NULL,
-                                width = 6,
-                                  numericInput("explorer_min_rt",
-                                               label = "RT Start:",
-                                               value = NA),
-                                  numericInput("explorer_max_rt",
-                                               label = "RT End:",
-                                               value = NA)
-                                )
-                          ),
-                        fluidRow(
-                          box(title="Ions to Plot",
-                              width=6,
+                            box(title="Plot Limits",
+                                width = 4,
+                                collapsible=T,
+                                collapsed=T,
+                                numericInput("explorer_min_rt",
+                                             label = "RT Start:",
+                                             value = NA),
+                                numericInput("explorer_max_rt",
+                                             label = "RT End:",
+                                             value = NA)
+                            ),
+                            box(title="Ions to Plot",
+                                width=4,
+                                collapsible=T,
+                                collapsed=T,
                                 verbatimTextOutput("mz_syntax_description"),
                                 textInput("explorer_fs_mz_range",
-                                                  label = "Full Scan:",
-                                                  value = NA),
+                                          label = "Full Scan:",
+                                          value = NA),
                                 textInput("explorer_sim_mz_range",
-                                                  label = "SIM Scan:",
-                                                  value = NA)
-                              )
-                        ),
-                          verbatimTextOutput("explorer_spectra_range"),
-                          plotlyOutput("explorer_chromatogram_plot")
+                                          label = "SIM Scan:",
+                                          value = NA)
+                            )
+                          ),
+                          box(title=NULL,
+                              width=12,
+                              textOutput("explorer_spectra_range"),
+                              plotlyOutput("explorer_chromatogram_plot"))
                         )
                 )    
             )
@@ -628,119 +459,349 @@ ingest_function <- function(gcms_template_file) {
 server <- function(input, output, session) {
   # Ingest Data Tab
   {
-      volumes = c("C"="C:/",getVolumes()())
+    ingest_function <- function(gcms_template_file) {
       
-      shinyFileChoose(input,
-                      id="gcms_template",
-                      roots=volumes,
-                      defaultRoot = "C",
-                      defaultPath = "/Box/Konecky Lab/Data/Agilent GC-MS (Bradley Lab Cyborg)",
-                      session=session,
-                      filetypes=c("xlsx"))
+      # Read in the gcms_template file
+      {
+        sequence <- read_xlsx(gcms_template_file,sheet="sequence") %>% rename(line=injection)
+        comp_list <- read_excel(gcms_template_file,sheet="comp_list")
+        parameters <- read_excel(gcms_template_file,sheet="parameters")[,1:2] %>% spread(parameter,value) %>% 
+          type.convert(.,as.is=T) %>% # Very neat trick to coerce all columns to the variable type they look like.
+          mutate(rfs_spike_volume = ifelse(is.na(rfs_spike_volume),0,rfs_spike_volume))
+      }
       
-      observe({
-        cat("\ninput$gcms_template value:\n\n")
-        print(input$gcms_template)
-      })
-      
-
-      
-      output$introduction <- renderUI({
-        tagList(
-          p("placeholder")
-        )
-      })
-      
-      ingest <- reactive({
-        if (length(parseFilePaths(volumes,input$gcms_template)$datapath) == 0) {
-          return(NULL)
-        } else {
-          ingest_function(parseFilePaths(volumes,input$gcms_template)$datapath)
+      # Look for ".D" files located in the same directory as the GCMS template file.
+      # Convert Hybrid MS Data to excel files containing one sheet each for Full Scan and SIM Scan data. 
+      # If exported data already exists, then skip the conversion.
+      {
+        files <- list.files(path=dirname(gcms_template_file),pattern=".D",full.names=T)
+        for(i in 1:length(files)){
+          if(!length(list.files(path=files[i],pattern="chrom_data.xlsx")) == 1)
+          {
+            rawdata <- read_chroms(files[i],format_in=parameters$format_in,format_out="data.frame")
+            fullscan <- rawdata[[1]]$MS1 %>% mutate(mz = round(mz,parameters$mz_digits)) %>% group_by(rt,mz) %>% summarize(intensity = sum(intensity))
+            simscan <- rawdata[[2]]$MS1
+            write_xlsx(list("full"=fullscan,"sim"=simscan),path=paste0(files[i],"/chrom_data.xlsx"))
+            rm(rawdata,fullscan,simscan)
+          }
         }
-      })
+        rm(files,i)
+      }
       
-      output$gcms_template_status <- renderInfoBox({
-        if(length(parseFilePaths(volumes,input$gcms_template)$datapath) == 0) {text = "No File Uploaded!"; use_color = "blue"}
-        else {text = "File Uploaded."; use_color = "green"}
-        infoBox("Status:",text,icon = icon("file-excel"),color = use_color)
-      })
+      # Read back in the converted excel files.
+      {
+        files <- list.files(dirname(gcms_template_file),pattern="chrom_data.xlsx",recursive=T,full.names=T)
+        filenames <- basename(dirname(files))
+        
+        raw_full <- lapply(files,read_excel,sheet="full") # Read in files
+        raw_full <- setNames(raw_full,filenames) # Set injection name
+        raw_full <- bind_rows(raw_full,.id="injection") # Convert to a single data.frame
+        
+        raw_sim <- lapply(files,read_excel,sheet="sim")
+        raw_sim <- setNames(raw_sim,filenames)
+        raw_sim <- bind_rows(raw_sim,.id="injection")
+        
+        rawdata <- full_join(raw_full %>% mutate(scan_type = "full"),
+                             raw_sim %>% mutate(scan_type = "sim"))
+          
+        
+        rm(files,filenames,raw_full,raw_sim)
+      }
       
-      output$troubleshooting <- renderPrint(parseFilePaths(volumes,input$gcms_template)$datapath)
-      output$errors <-        renderPrint(ingest()$errors)
-      output$raw_gcms_data <- renderDT(ingest()$rawdata,options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-      output$sample_info <-   renderDT(ingest()$sample_info,  options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-      output$standard_info <- renderDT(ingest()$standard_info,options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space: nowrap')
-      output$sequence <-      renderDT(ingest()$sequence,     options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-      output$comp_list <-     renderDT(ingest()$comp_list,    options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-      output$parameters <-    renderDT(ingest()$parameters,   options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-      output$gcms_names <-    renderDT(ingest()$gcms_names,   options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
+      # Read and format metadata from the injection folders and template
+      {
+        # Get entered names for each injection
+        {
+          files <- list.files(dirname(gcms_template_file),pattern="runstart.txt",recursive=T,full.names=T)
+          filenames <- basename(dirname(files))
+          
+          gcms_names <- lapply(files,readLines) %>% 
+            setNames(filenames) %>% 
+            bind_rows(.id="injection") %>% 
+            gather(injection,runstart) %>% 
+            group_by(injection) %>% 
+            filter(grepl("dataname",runstart) & !grepl("dataname2",runstart)) %>% 
+            mutate(id1 = substr(runstart,gregexpr("= ",runstart)[[1]][1]+2,str_length(runstart))) %>% 
+            select(-runstart) %>% 
+            mutate(line = as.numeric(substr(injection,gregexpr("_",injection)[[1]][1]+1,gregexpr(".D",injection)[[1]][1]-1)))
+          
+          rm(files,filenames)
+        }
+        
+        # Grab the standards off the template's sequence sheet, match against chemstation data, and format relevant metadata.
+        standard_info <- sequence %>% 
+          mutate(id2 = suppressWarnings(as.numeric(id2))) %>% filter(!is.na(id2)) %>% 
+          mutate(dummy=T) %>% full_join(parameters %>% mutate(dummy=T),by="dummy") %>% 
+          full_join(comp_list %>% mutate(dummy=T),by="dummy",relationship = "many-to-many") %>% 
+          left_join(gcms_names,by=c("line","id1")) %>% 
+          select(line,injection,id1,id2,comp:mixed_stock_concentration,cal_curve_dilution_factor,cal_curve_volume,rfs_spike_volume,rt_window) %>% 
+          mutate(total_volume = cal_curve_volume + rfs_spike_volume,
+                 initial_concentration = mixed_stock_concentration * cal_curve_volume / total_volume,
+                 initial_concentration = ifelse(is.na(initial_concentration),0,initial_concentration),
+                 curve_concentration = initial_concentration * cal_curve_dilution_factor^id2,
+                 window_lower = rt-rt_window,
+                 window_upper = rt+rt_window
+          )
+        
+        # Do the same thing for samples
+        sample_info <- sequence %>% filter(grepl("sample",id2)) %>% 
+          mutate(dummy=T) %>% full_join(parameters %>% mutate(dummy=T),by="dummy") %>% 
+          left_join(gcms_names,by=c("line","id1")) %>% 
+          select(line,injection,id1:sample_mass_grams,rfs_spike_volume) %>% 
+          mutate(total_volume = volume + rfs_spike_volume)
+      }
+      
+      # Some simple summary info about our rawdata.
+      {
+        scan_info <- rawdata %>% 
+          group_by(scan_type) %>% 
+          mutate(min_mz = min(mz),
+                 max_mz = max(mz)) %>% 
+          filter(rt < min(rt)+2) %>% 
+          group_by(scan_type,min_mz,max_mz) %>% 
+          summarize(resolution = numdec(mz)) %>% 
+          mutate(mz_string = paste0(min_mz,"-",max_mz))
+      }
+      
+      # Checks for problems
+      {
+        # check to see if any of our standard or sample entries in the 'sequence' sheet are missing a matching injection.
+        {
+          injection_sequence_matching <- bind_rows(standard_info %>% select(injection,id1),
+                                                   sample_info %>% select(injection,id1)) %>% 
+            distinct() %>% 
+            mutate(id1 = ifelse(is.na(id1),"",id1)) %>% 
+            filter(is.na(injection)) %>% 
+            summarize(list = str_c(id1,collapse=" | ")) %>% 
+            .$list
+          
+          
+          
+          if(injection_sequence_matching > 1){
+            injection_sequence_error <- paste0("These id1 entries in the 'sequence' sheet have no matching injection sample name: ",injection_sequence_matching,
+                                               "\nSee GCMS Names output box for injection sample names to help find what is wrong.")
+          } else {injection_sequence_error = NULL}
+          
+          
+        }
+        # check for empty data frames
+        {
+          empty_list <- data.frame("rawdata" = length(rawdata)==0,
+                                   "scan_info" = length(scan_info)==0,
+                                   "sample_info" = length(sample_info)==0,
+                                   "standard_info" = length(standard_info)==0,
+                                   "sequence" = length(sequence)==0,
+                                   "comp_list" = length(comp_list)==0,
+                                   "parameters" = length(parameters)==0,
+                                   "gcms_names" = length(gcms_names)==0
+          ) %>% 
+            gather(object,empty) %>% 
+            filter(empty == T) %>% 
+            summarize(list = str_c(object,collapse=" | "))
+          
+          if(empty_list != ""){
+            empty_list_error <- paste0("The following required objects are empty, indicating a problem during import and initial processing: ",empty_list,
+                                       "\nCheck that your template and exported GCMS data match examples or contact jackh@wustl.edu")
+          } else {empty_list_error = NULL}
+          
+          errors = c(injection_sequence_error,empty_list_error)
+          
+        }
+        
+        final_check = is.null(errors)
+        
+      }
+      
+      
+      
+      if(final_check){
+        list("final_check" = final_check,
+             "errors" = errors,
+             "rawdata" = rawdata,
+             "scan_info" = scan_info,
+             "sample_info" = sample_info,
+             "standard_info" = standard_info,
+             "sequence" = sequence,
+             "comp_list" = comp_list,
+             "parameters" = parameters,
+             "gcms_names" = gcms_names)
+      } else if(!final_check){
+        list("final_check" = errors)
+      }
     }
+    
+    
+    
+    volumes = c("C"="C:/",getVolumes()())
+    
+    shinyFileChoose(input,
+                    id="gcms_template",
+                    roots=volumes,
+                    defaultRoot = "C",
+                    defaultPath = "/Box/Konecky Lab/Data/Agilent GC-MS (Bradley Lab Cyborg)",
+                    session=session,
+                    filetypes=c("xlsx"))
+    
+    observe({
+      cat("\ninput$gcms_template value:\n\n")
+      print(input$gcms_template)
+    })
+    
+    
+    
+    output$introduction <- renderUI({
+      tagList(
+        p("placeholder")
+      )
+    })
+    
+    ingest <- reactive({
+      if (length(parseFilePaths(volumes,input$gcms_template)$datapath) == 0) {
+        return(NULL)
+      } else {
+        ingest_function(parseFilePaths(volumes,input$gcms_template)$datapath)
+      }
+    })
+    
+    output$gcms_template_status <- renderInfoBox({
+      if(length(parseFilePaths(volumes,input$gcms_template)$datapath) == 0) {text = "No File Uploaded!"; use_color = "blue"}
+      else {text = "File Uploaded."; use_color = "green"}
+      infoBox("Status:",text,icon = icon("file-excel"),color = use_color)
+    })
+    
+    output$troubleshooting <- renderPrint(parseFilePaths(volumes,input$gcms_template)$datapath)
+    output$errors <-        renderPrint(ingest()$errors)
+    output$raw_gcms_data <- renderDT(ingest()$rawdata,options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
+    output$sample_info <-   renderDT(ingest()$sample_info,  options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
+    output$standard_info <- renderDT(ingest()$standard_info,options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space: nowrap')
+    output$sequence <-      renderDT(ingest()$sequence,     options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
+    output$comp_list <-     renderDT(ingest()$comp_list,    options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
+    output$parameters <-    renderDT(ingest()$parameters,   options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
+    output$gcms_names <-    renderDT(ingest()$gcms_names,   options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
+  }
+       
   
   # Chromatogram Explorer
   {
     chromatogram_function <- function(rawdata,
                                       scan_info,
+                                      standard_info,
                                       gcms_names,
                                       inj_sel,
                                       min_rt,
                                       max_rt,
                                       full_mz,
-                                      sim_mz) {
+                                      sim_mz
+                                      ) {
       
+      if(!is.null(rawdata)){
+        full_mz = ifelse(full_mz=="",paste0(scan_info$min_mz[which(scan_info$scan_type=="full")],"-",
+                                            scan_info$max_mz[which(scan_info$scan_type=="full")]),full_mz)
+        
+        sim_mz = ifelse(sim_mz=="",paste0(scan_info$min_mz[which(scan_info$scan_type=="sim")],"-",
+                                          scan_info$max_mz[which(scan_info$scan_type=="sim")]),sim_mz)
+        
+        mz_selection <- data.frame(scan_type = unique(rawdata$scan_type),
+                                   mz_range = c(full_mz,sim_mz)) %>% 
+          separate_wider_delim(mz_range,delim=",",too_few = "align_start",names_sep="_") %>% 
+          gather(id,range,-scan_type) %>% 
+          separate_wider_delim(range,delim="-",too_few="align_start",names_sep="_") %>% 
+          gather(range,mz,-c(scan_type,id)) %>% 
+          mutate(mz = as.numeric(mz)) %>% 
+          spread(range,mz) %>% 
+          mutate(range_2 = ifelse(is.na(range_2),range_1,range_2)) %>% 
+          full_join(scan_info,by = join_by(scan_type)) %>% 
+          select(-c(min_mz,max_mz)) %>% 
+          na.omit() %>% 
+          rowwise() %>% 
+          mutate(mz = list(seq(from=range_1,to=range_2,10^-resolution))) %>% 
+          select(scan_type,mz) %>% 
+          unnest(mz) %>% 
+          distinct()
+        
+        
+        chrom_data <- rawdata %>% left_join(gcms_names) %>% mutate(injection_id1 = paste(injection,id1,sep=" | ")) %>% 
+          right_join(mz_selection)
+        
+        chrom_data_working <- chrom_data %>% filter(injection_id1 %in% inj_sel) %>% 
+          group_by(injection,id1,injection_id1,scan_type,rt) %>% summarize(tic = sum(intensity)) %>% 
+          ungroup() %>% 
+          mutate(scan_type = as.character(factor(scan_type,levels=c("full","sim"),labels=c("Full Scan","SIM Scan"),ordered=T))) %>% 
+          mutate(injection_label = paste0(injection,"\n",id1))
+        
+        chrom_data_downsampled <- chrom_data_working[seq(1,nrow(chrom_data_working),by=5),] %>% 
+          group_by(scan_type) %>% 
+          mutate(max_resp = max(tic))
+        
+        chromatogram_plot <- chrom_data_working %>%
+          ggplot(aes(x=rt,y=tic,color=injection_label,customdata = scan_type)) +
+          geom_point(data=chrom_data_downsampled,alpha=0) +
+          geom_path() +
+          scale_x_continuous(limits = c(min_rt,max_rt),expand = expand_scale(mult=0,add=0),n.breaks=25) +
+          scale_y_continuous(expand = expand_scale(mult = c(0,1.1),add=0)) +
+          facet_wrap(~scan_type,scales="free_y",ncol=1,strip.position = "right") +
+          theme(legend.position = "top",
+                strip.background = element_blank(),
+                panel.border = element_rect(fill=NA,color="black")
+          ) +
+          labs(x="Retention Time (minutes)",
+               y="Instrument Response (arbitrary units)",
+               color="Injection")
 
-      full_mz = ifelse(full_mz=="",paste0(scan_info$min_mz[which(scan_info$scan_type=="full")],"-",
-                                               scan_info$max_mz[which(scan_info$scan_type=="full")]),full_mz)
-
-      sim_mz = ifelse(sim_mz=="",paste0(scan_info$min_mz[which(scan_info$scan_type=="sim")],"-",
-                                             scan_info$max_mz[which(scan_info$scan_type=="sim")]),sim_mz)
-      
-      mz_selection <- data.frame(scan_type = unique(rawdata$scan_type),
-                                 mz_range = c(full_mz,sim_mz)) %>% 
-        separate_wider_delim(mz_range,delim=",",too_few = "align_start",names_sep="_") %>% 
-        gather(id,range,-scan_type) %>% 
-        separate_wider_delim(range,delim="-",too_few="align_start",names_sep="_") %>% 
-        gather(range,mz,-c(scan_type,id)) %>% 
-        mutate(mz = as.numeric(mz)) %>% 
-        spread(range,mz) %>% 
-        mutate(range_2 = ifelse(is.na(range_2),range_1,range_2)) %>% 
-        full_join(scan_info,by = join_by(scan_type)) %>% 
-        select(-c(min_mz,max_mz)) %>% 
-        na.omit() %>% 
-        rowwise() %>% 
-        mutate(mz = list(seq(from=range_1,to=range_2,10^-resolution))) %>% 
-        select(scan_type,mz) %>% 
-        unnest(mz) %>% 
-        distinct()
-
-      
-      tic_data <- rawdata %>% left_join(gcms_names) %>% mutate(injection_id1 = paste(injection,id1,sep=" | ")) %>% 
-        right_join(mz_selection)
-      
-      tic_data_working <- tic_data %>% filter(injection_id1 %in% inj_sel) %>% 
-        group_by(injection,id1,injection_id1,scan_type,rt) %>% summarize(tic = sum(intensity)) %>% 
-        ungroup() %>% 
-        mutate(scan_type = as.character(factor(scan_type,levels=c("full","sim"),labels=c("Full Scan","SIM Scan"),ordered=T))) %>% 
-        mutate(injection_label = paste0(injection,"\n",id1))
-      
-      tic_data_downsampled <- tic_data_working[seq(1,nrow(tic_data_working),by=5),] %>% 
-        group_by(scan_type) %>% 
-        mutate(max_resp = max(tic))
-      
-      chromatogram_plot <- tic_data_working %>%
-        ggplot(aes(x=rt,y=tic,color=injection_label,customdata = scan_type)) +
-        geom_point(data=tic_data_downsampled,alpha=0) +
-        geom_path() +
-        # geom_vline(data=NULL,xintercept=spectra_lower) +
-        # geom_vline(data=NULL,xintercept=spectra_upper) +
-        scale_x_continuous(limits = c(min_rt,max_rt),expand = expand_scale(),n.breaks=25) +
-        facet_wrap(~scan_type,scales="free_y",ncol=1,strip.position = "right") +
-        theme(legend.position = "top") +
-        labs(x="Retention Time (minutes)",
-             y="Instrument Response (arbitrary units)",
-             color="Injection")
-      
-      list("chromatogram_plot" = chromatogram_plot)
+        list("chromatogram_plot" = chromatogram_plot,
+             "passcheck" = T)
+      } else {
+        list("chromatogram_plot" = ggplot()+annotate("text",x=0,y=0,label="No data loaded.",color="red")+theme_void(),
+             "passcheck" = F)
+      }
     }
+    
+    spectra_function <- function(rawdata,
+                                 standard_info,
+                                 gcms_names,
+                                 inj_sel,
+                                 rt_selection){
+      
+      if(!is.null(rt_selection)){
+        spectral_selection <- rt_selection %>% 
+          group_by(scan_type) %>% 
+          summarize(lower = min(x),
+                    upper = max(x)) %>% 
+          ungroup() %>% 
+          mutate(scan_type = ifelse(scan_type == "Full Scan","full","sim"))
+
+        standard_spectral_data <- standard_info %>% select(line,injection) %>% distinct() %>%
+          left_join(gcms_names,by = join_by(line, injection)) %>%
+          left_join(rawdata,by = join_by(injection)) %>% 
+          right_join(spectral_selection,by="scan_type") %>% 
+          filter(rt >= lower & rt <= upper) %>%
+          group_by(injection,mz) %>%
+          summarize(total_intensity = sum(intensity)) %>% 
+          group_by(injection) %>%
+          mutate(scaled_intensity = total_intensity / max(total_intensity)) %>%
+          group_by(injection,mz) %>%
+          summarize(mean_intensity = mean(scaled_intensity),
+                    sd_intensity = ifelse(is.na(sd(scaled_intensity)),0,sd(scaled_intensity)))
+        
+        sample_spectral_data <- data.frame(injection_id1 = inj_sel) %>% 
+          separate_wider_delim(cols = injection_id1,delim = " | ",
+                               names=c("injection","id1")) %>% 
+          left_join(rawdata,by="injection") %>% 
+          left_join(spectral_selection,by="scan_type") %>% 
+          filter(rt >= lower & rt <= upper) %>%
+          group_by(injection,mz) %>%
+          summarize(total_intensity = sum(intensity)) %>% 
+          group_by(injection) %>%
+          mutate(scaled_intensity = total_intensity / max(total_intensity)) %>%
+          group_by(injection,mz) %>%
+          summarize(mean_intensity = mean(scaled_intensity))
+        
+        print(sample_spectral_data)
+        
+      }
+    }
+
+
     
     injection_list <- reactive({
       if(!is.null(ingest()$gcms_names)){
@@ -760,17 +821,17 @@ server <- function(input, output, session) {
       single values, or single values separated by commas (e.g., 71, 77, 78).
       You may also provide comma-separated sets of ranges (e.g., 71 - 77, 80, 90 - 400)."
     })
+    
     chromatogram_explorer <- reactive({chromatogram_function(rawdata = ingest()$rawdata,
                                                              scan_info = ingest()$scan_info,
+                                                             standard_info = ingest()$standard_info,
                                                              gcms_names = ingest()$gcms_names,
                                                              inj_sel = input$injection_selection,
                                                              min_rt = input$explorer_min_rt,
                                                              max_rt = input$explorer_max_rt,
                                                              full_mz = input$explorer_fs_mz_range,
                                                              sim_mz = input$explorer_sim_mz_range)})
-    
-    
-    
+
     output$explorer_chromatogram_plot <- renderPlotly({
       plot <- chromatogram_explorer()$chromatogram_plot
       plotly_obj <- ggplotly(plot, dynamicTicks = T)
@@ -779,30 +840,31 @@ server <- function(input, output, session) {
         event_register(event = "plotly_selected") %>%
         config(modeBarButtons = list(list("zoom2d", "pan2d", "select2d")),
                displaylogo = FALSE)
-
-      # Extract correct facet-axis mapping from ggplotly()
-      axis_map <- gg$x$data %>%
-        purrr::map_dfr(~ data.frame(
-          scan_type = .x$customdata[[1]],  # Extract correct scan_type from customdata
-          xaxis = .x$xaxis %||% "x",
-          yaxis = .x$yaxis %||% "y",
-          max_y = max(.x$y)
-        )) %>%
-        distinct() %>% 
-        group_by(scan_type,xaxis,yaxis) %>% 
-        summarize(max_y = max(max_y))
-
-      # Store mapping for use in selections
-      session$userData$axis_map <- axis_map
-      session$userData$plot_data <- gg$x$data
-      
-      
-
+      if(chromatogram_explorer()$passcheck){
+        # Extract correct facet-axis mapping from ggplotly()
+        axis_map <- gg$x$data %>%
+          purrr::map_dfr(~ data.frame(
+            scan_type = .x$customdata[[1]],  # Extract correct scan_type from customdata
+            xaxis = .x$xaxis %||% "x",
+            yaxis = .x$yaxis %||% "y",
+            max_y = max(.x$y)
+          )) %>%
+          distinct() %>% 
+          group_by(scan_type,xaxis,yaxis) %>% 
+          summarize(max_y = max(max_y))
+        # Store mapping for use in selections
+        session$userData$axis_map <- axis_map
+        session$userData$plot_data <- gg$x$data
+      }
       gg
     })
     
-    observeEvent(event_data("plotly_selected"), {
-      
+    output$explorer_spectra_range <- renderPrint({
+      cat("No selection made. Use the 'Box Select' mode in the upper-right of plot to select range to display mass spectra. 
+          You must draw the box over the plotted points on the chromatogram.")
+    })
+
+    observeEvent(event_data("plotly_selected"),{
       if(length(event_data("plotly_selected")) != 0){
         selected <- event_data("plotly_selected") %>% 
           rename(scan_type = customdata) %>%
@@ -826,24 +888,41 @@ server <- function(input, output, session) {
           plotlyProxyInvoke("relayout","shapes",list(shape))
         
         session$userData$explorer_selection <- selected
-      }
+      } else {session$userData$explorer_selection <- NULL}
+      
+      output$explorer_spectra_range <- renderPrint({
+        if (is.null(session$userData$explorer_selection)) {
+          selected_output <- "No selection made. Use the 'Box Select' mode in the upper-right of plot to select range to display mass spectra.
+        You must draw the box over the plotted points on the chromatogram."
+        } else {
+          x_range <- range(session$userData$explorer_selection$x)  # Extract min & max x-values
+          selected_output <- paste("Selected RT Range:", round(x_range[1],2), "to", round(x_range[2],2), "minutes")
+        }
+        cat(selected_output)
+      })
+      
+      session$userData$spectra_explorer <- spectra_function(rawdata = ingest()$rawdata,
+                                                     standard_info = ingest()$standard_info,
+                                                     gcms_names = ingest()$gcms_names,
+                                                     inj_sel = input$injection_selection,
+                                                     rt_selection = session$userData$explorer_selection)
     })
     
-    output$explorer_spectra_range <- renderPrint({
-      selected <- event_data("plotly_selected")
+
       
-      if (is.null(selected) || length(selected) == 0) {
-        "No selection made"
-      } else {
-        x_range <- range(selected$x)  # Extract min & max x-values
-        paste("Selected Range:", round(x_range[1],2), "to", round(x_range[2],2))
-      }
-    })
+  
+    
+
+    
+
+
     
     
     
 
+  
   }
+  
 }
 
 shinyApp(ui, server = server)
