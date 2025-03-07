@@ -448,7 +448,10 @@ library(chromConverter) # read and convert MS data
                           box(title=NULL,
                               width=12,
                               textOutput("explorer_spectra_range"),
-                              plotlyOutput("explorer_chromatogram_plot"))
+                              plotlyOutput("explorer_chromatogram_plot")),
+                          box(title=NULL,
+                              width=12,
+                              plotlyOutput("sample_spectra_plot"))
                         )
                 )    
             )
@@ -779,25 +782,37 @@ server <- function(input, output, session) {
           summarize(total_intensity = sum(intensity)) %>% 
           group_by(injection) %>%
           mutate(scaled_intensity = total_intensity / max(total_intensity)) %>%
-          group_by(injection,mz) %>%
-          summarize(mean_intensity = mean(scaled_intensity),
-                    sd_intensity = ifelse(is.na(sd(scaled_intensity)),0,sd(scaled_intensity)))
+          group_by(mz) %>%
+          summarize(mean_intensity = mean(scaled_intensity)) %>% 
+          arrange(mean_intensity)
         
-        sample_spectral_data <- data.frame(injection_id1 = inj_sel) %>% 
+        sample_spectral_data <- data.frame(injection_id1 = inj_sel) %>%
           separate_wider_delim(cols = injection_id1,delim = " | ",
-                               names=c("injection","id1")) %>% 
-          left_join(rawdata,by="injection") %>% 
-          left_join(spectral_selection,by="scan_type") %>% 
-          filter(rt >= lower & rt <= upper) %>%
-          group_by(injection,mz) %>%
-          summarize(total_intensity = sum(intensity)) %>% 
-          group_by(injection) %>%
-          mutate(scaled_intensity = total_intensity / max(total_intensity)) %>%
-          group_by(injection,mz) %>%
-          summarize(mean_intensity = mean(scaled_intensity))
+                               names=c("injection","id1")) %>%
+          mutate(injection_id1 = paste0(injection,"_",id1)) %>% 
+          left_join(rawdata,by="injection") %>%
+          left_join(spectral_selection,by="scan_type") %>%
+          filter(rt >= lower & rt <= upper) %>% 
+          group_by(injection_id1,injection,mz) %>%
+          summarize(total_intensity = sum(intensity)) %>%
+          group_by(injection_id1,injection) %>%
+          mutate(scaled_intensity = total_intensity / max(total_intensity)) %>% 
+          arrange(-scaled_intensity) %>% 
+          gather(intensity_type,value,c("total_intensity","scaled_intensity"))
+
+        # print(standard_spectral_data,n=10)
+        # print(sample_spectral_data,n=1000)
         
-        print(sample_spectral_data)
+        sample_plot <- sample_spectral_data %>% 
+          filter(intensity_type == "total_intensity") %>% 
+          ggplot(aes(x=mz,y=value,color=injection_id1)) +
+          geom_segment(aes(xend=mz,yend=0),position = position_dodge(width=1/10))
         
+        list("sample_plot" = sample_plot,
+             "passcheck" = T)
+      } else {
+        list("sample_plot" = ggplot()+annotate("text",x=0,y=0,label="No data loaded.",color="red")+theme_void(),
+             "passcheck" = F)
       }
     }
 
@@ -906,6 +921,11 @@ server <- function(input, output, session) {
                                                      gcms_names = ingest()$gcms_names,
                                                      inj_sel = input$injection_selection,
                                                      rt_selection = session$userData$explorer_selection)
+      
+      output$sample_spectra_plot <- renderPlotly({
+        ggplotly(session$userData$spectra_explorer$sample_plot)
+      })
+      
     })
     
 
