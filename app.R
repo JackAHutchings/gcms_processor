@@ -736,25 +736,49 @@ server <- function(input, output, session) {
           group_by(scan_type) %>% 
           mutate(max_resp = max(tic))
         
-        chromatogram_plot <- chrom_data_working %>%
-          ggplot(aes(x=rt,y=tic,color=injection_label,customdata = scan_type)) +
-          geom_point(data=chrom_data_downsampled,alpha=0) +
-          geom_path() +
-          scale_x_continuous(limits = c(min_rt,max_rt),expand = expand_scale(mult=0,add=0),n.breaks=25) +
-          scale_y_continuous(expand = expand_scale(mult = c(0,1.1),add=0)) +
-          facet_wrap(~scan_type,scales="free_y",ncol=1,strip.position = "right") +
-          theme(legend.position = "top",
-                strip.background = element_blank(),
-                panel.border = element_rect(fill=NA,color="black")
-          ) +
-          labs(x="Retention Time (minutes)",
-               y="Instrument Response (arbitrary units)",
-               color="Injection")
+      chromatogram_plot <- chrom_data_working %>%
+        ggplot(aes(x=rt,y=tic,color=injection_label,customdata = scan_type)) +
+        geom_point(data=chrom_data_downsampled,alpha=0) +
+        geom_path() +
+        scale_x_continuous(limits = c(min_rt,max_rt),expand = expansion(mult=0,add=0),n.breaks=25) +
+        scale_y_continuous(expand = expand_scale(mult = c(0,1.1),add=0)) +
+        facet_wrap(~scan_type,scales="free_y",ncol=1,strip.position = "right") +
+        theme(legend.position = "top",
+              strip.background = element_blank(),
+              panel.border = element_rect(fill=NA,color="black")
+        ) +
+        labs(x="Retention Time (minutes)",
+             y="Response (arbs)",
+             color="Injection")
 
-        list("chromatogram_plot" = chromatogram_plot,
+      # list("chromatogram_plot" = chromatogram_plot,
+      #      "passcheck" = T)
+      # } else {
+      #   list("chromatogram_plot" = ggplot()+annotate("text",x=0,y=0,label="No data loaded.",color="red")+theme_void(),
+      #        "passcheck" = F)
+      # }
+      #   
+        
+        full_plot <- chrom_data_working %>% filter(scan_type == "Full Scan") %>% 
+          ggplot(aes(x=rt,y=tic,color=injection_label,customdata = scan_type)) +
+          geom_path() +
+          geom_point(data=chrom_data_downsampled %>% filter(scan_type == "Full Scan"),alpha=0) +
+          scale_x_continuous(limits = c(min_rt,max_rt),expand = expansion(mult=0,add=0),n.breaks=25) +
+          labs(color="Injection")
+        
+        sim_plot <- chrom_data_working %>% filter(scan_type == "SIM Scan") %>% 
+          ggplot(aes(x=rt,y=tic,color=injection_label,customdata = scan_type)) +
+          geom_path() +
+          geom_point(data=chrom_data_downsampled %>% filter(scan_type == "SIM Scan"),alpha=0) +
+          scale_x_continuous(limits = c(min_rt,max_rt),expand = expansion(mult=0,add=0),n.breaks=25) +
+          labs(color="Injection")
+
+        list("full_plot" = full_plot,
+             "sim_plot" = sim_plot,
              "passcheck" = T)
       } else {
-        list("chromatogram_plot" = ggplot()+annotate("text",x=0,y=0,label="No data loaded.",color="red")+theme_void(),
+        list("full_plot" = ggplot()+annotate("text",x=0,y=0,label="No data loaded.",color="red")+theme_void(),
+             "sim_plot" = ggplot()+annotate("text",x=0,y=0,label="No data loaded.",color="red")+theme_void(),
              "passcheck" = F)
       }
     }
@@ -793,20 +817,27 @@ server <- function(input, output, session) {
           left_join(rawdata,by="injection") %>%
           left_join(spectral_selection,by="scan_type") %>%
           filter(rt >= lower & rt <= upper) %>% 
-          group_by(injection_id1,injection,mz) %>%
+          group_by(injection_id1,injection,id1,mz) %>%
           summarize(total_intensity = sum(intensity)) %>%
           group_by(injection_id1,injection) %>%
           mutate(scaled_intensity = total_intensity / max(total_intensity)) %>% 
           arrange(-scaled_intensity) %>% 
-          gather(intensity_type,value,c("total_intensity","scaled_intensity"))
+          gather(intensity_type,value,c("total_intensity","scaled_intensity")) %>% 
+          rowwise() %>% 
+          mutate(value = list(c(0,value))) %>% unnest(value) %>% 
+          mutate(injection_id1_mz = paste0(injection_id1,"_",mz)) %>% 
+          mutate(injection_label = paste0(injection,"\n",id1))
 
         # print(standard_spectral_data,n=10)
         # print(sample_spectral_data,n=1000)
         
         sample_plot <- sample_spectral_data %>% 
           filter(intensity_type == "total_intensity") %>% 
-          ggplot(aes(x=mz,y=value,color=injection_id1)) +
-          geom_segment(aes(xend=mz,yend=0),position = position_dodge(width=1/10))
+          ggplot(aes(x=mz,y=value,color=injection_label,group=injection_id1_mz)) +
+          geom_line(position = position_dodge(width=0.5)) +
+          labs(x="m/z",
+               y="Response (arbs)",
+               color="Injection")
         
         list("sample_plot" = sample_plot,
              "passcheck" = T)
@@ -848,13 +879,44 @@ server <- function(input, output, session) {
                                                              sim_mz = input$explorer_sim_mz_range)})
 
     output$explorer_chromatogram_plot <- renderPlotly({
-      plot <- chromatogram_explorer()$chromatogram_plot
-      plotly_obj <- ggplotly(plot, dynamicTicks = T)
       
-      gg <- plotly_obj %>% 
-        event_register(event = "plotly_selected") %>%
-        config(modeBarButtons = list(list("zoom2d", "pan2d", "select2d")),
-               displaylogo = FALSE)
+      full_scan <- ggplotly(chromatogram_explorer()$full_plot,dynamicTicks = T)
+      sim_scan <- ggplotly(chromatogram_explorer()$sim_plot,dynamicTicks = T) %>% 
+        style(showlegend=F) #We only need one legend as they both plot injection_id1
+      plotly_obj <- subplot(full_scan,
+                            sim_scan,
+                            titleX=T,
+                            titleY=F,
+                            nrows=2)
+      
+      # plot <- chromatogram_explorer()$chromatogram_plot
+      # plotly_obj <- ggplotly(plot, dynamicTicks = T,source = "explorer_chromatogram")
+      
+      gg <- event_register(plotly_obj,event = "plotly_selected") %>%
+        plotly::config(modeBarButtons = list(list("zoom2d", "select2d")),
+               displaylogo = FALSE) %>% 
+        layout(xaxis = list(title = NA,
+                            automargin=T,
+                            showticklabels = F,
+                            mirror=T),
+               xaxis2 = list(title = "Retention Time (minutes)",
+                             automargin=T,
+                             mirror=T),
+               yaxis = list(mirror=T),
+               yaxis2 = list(mirror=T),
+               annotations = list(x = 0,
+                                  y = 0.5,
+                                  xshift = -50,
+                                  text = "Response (arbs)",
+                                  showarrow = F,
+                                  textangle = -90,
+                                  xref = "paper",
+                                  yref = "paper",
+                                  xanchor = "top",
+                                  yanchor = "center"),
+               margin = list(l = 50)
+        )
+
       if(chromatogram_explorer()$passcheck){
         # Extract correct facet-axis mapping from ggplotly()
         axis_map <- gg$x$data %>%
@@ -864,14 +926,18 @@ server <- function(input, output, session) {
             yaxis = .x$yaxis %||% "y",
             max_y = max(.x$y)
           )) %>%
-          distinct() %>% 
-          group_by(scan_type,xaxis,yaxis) %>% 
+          distinct() %>%
+          group_by(scan_type,xaxis,yaxis) %>%
           summarize(max_y = max(max_y))
         # Store mapping for use in selections
         session$userData$axis_map <- axis_map
         session$userData$plot_data <- gg$x$data
       }
+      
       gg
+      
+      
+      
     })
     
     output$explorer_spectra_range <- renderPrint({
@@ -879,9 +945,9 @@ server <- function(input, output, session) {
           You must draw the box over the plotted points on the chromatogram.")
     })
 
-    observeEvent(event_data("plotly_selected"),{
-      if(length(event_data("plotly_selected")) != 0){
-        selected <- event_data("plotly_selected") %>% 
+    observeEvent(event_data("plotly_selected",source="A"),{
+      if(length(event_data("plotly_selected",source="A")) != 0){
+        selected <- event_data("plotly_selected",source="A") %>% 
           rename(scan_type = customdata) %>%
           left_join(session$userData$axis_map,by="scan_type") %>%
           filter(x == min(x) | x == max(x))
@@ -898,7 +964,7 @@ server <- function(input, output, session) {
           fillcolor = "rgba(255, 0, 0, 0.3)",  # Red with transparency
           line = list(width = 0)  # No border
         )
-        
+
         plotlyProxy("explorer_chromatogram_plot", session) %>%
           plotlyProxyInvoke("relayout","shapes",list(shape))
         
@@ -923,7 +989,11 @@ server <- function(input, output, session) {
                                                      rt_selection = session$userData$explorer_selection)
       
       output$sample_spectra_plot <- renderPlotly({
-        ggplotly(session$userData$spectra_explorer$sample_plot)
+        ggplotly(session$userData$spectra_explorer$sample_plot,dynamicTicks = T) %>% 
+          plotly::config(modeBarButtons = list(list("zoom2d", "pan2d")),
+                 displaylogo = FALSE)
+        
+        
       })
       
     })
