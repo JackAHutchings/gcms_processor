@@ -412,6 +412,18 @@ library(chromConverter) # read and convert MS data
                 ),
                 tabItem(tabName = "chromatogram_tab",
                         fluidPage(
+                          tags$head(
+                            tags$style(HTML("
+                                            .dataTables_wrapper {
+                                              font-family: monospace;
+                                            }
+                                            .dataTables_scrollBody {
+                                              overflow-x: auto;
+                                            }
+                                            .dataTable td {
+                                              white-space: nowrap; /* Prevent word wrapping */
+                                            }
+                                          "))),
                           fluidRow(
                             box(title = "Injections to View",
                                 width = 4,
@@ -449,9 +461,17 @@ library(chromConverter) # read and convert MS data
                               width=12,
                               textOutput("explorer_spectra_range"),
                               plotlyOutput("explorer_chromatogram_plot")),
-                          box(title=NULL,
-                              width=12,
-                              plotlyOutput("sample_spectra_plot"))
+                          fluidRow(
+                            box(title=NULL,
+                                width=4,
+                                plotlyOutput("sample_spectra_plot")),
+                            box(title=NULL,
+                                width=4,
+                                DTOutput("sample_spectra_table")),
+                            box(title=NULL,
+                                width=4)
+                          ),
+
                         )
                 )    
             )
@@ -633,8 +653,6 @@ server <- function(input, output, session) {
       }
     }
     
-    
-    
     volumes = c("C"="C:/",getVolumes()())
     
     shinyFileChoose(input,
@@ -814,21 +832,41 @@ server <- function(input, output, session) {
           mutate(injection_id1_mz = paste0(injection_id1,"_",mz)) %>% 
           mutate(injection_label = paste0(injection,"\n",id1))
 
-        # print(standard_spectral_data,n=10)
-        # print(sample_spectral_data,n=1000)
-        
         sample_plot <- sample_spectral_data %>% 
           filter(intensity_type == "total_intensity") %>% 
           ggplot(aes(x=mz,y=value,color=injection_label,group=injection_id1_mz)) +
           geom_line(position = position_dodge(width=0.5)) +
+          scale_y_continuous(expand = expansion(mult = c(0,0.05))) +
           labs(x="m/z",
                y="Response (arbs)",
                color="Injection")
         
+        # browser()
+        
+        sample_table <- sample_spectral_data %>% 
+          group_by(injection_label) %>% 
+          filter(value > 0) %>% 
+          mutate(ranked_vals = rank(-value,ties.method = "first")) %>% 
+          filter(ranked_vals <= 10) %>% 
+          mutate(scaled_val = round(value / max(value),3)) %>% 
+          ungroup() %>% 
+          select(injection,id1,ranked_vals,mz,value,scaled_val) %>% 
+          rename(response = value,scaled = scaled_val) %>% 
+          mutate(response = formatC(response, format="e",digits=2),
+                 mz = sprintf("%3d",mz),
+                 scaled = formatC(scaled,format="f",digits=3)) %>% 
+          mutate(mz_scale_resp = paste(mz,scaled,response,sep=" | ")) %>%
+          mutate(injection_id1 = paste0(injection,"\n",id1)) %>% 
+          select(injection_id1,ranked_vals,mz_scale_resp) %>% 
+          spread(injection_id1,mz_scale_resp) %>% 
+          select(-ranked_vals)
+
         list("sample_plot" = sample_plot,
+             "sample_table" = sample_table,
              "passcheck" = T)
       } else {
         list("sample_plot" = ggplot()+annotate("text",x=0,y=0,label="No data loaded.",color="red")+theme_void(),
+             "sample_table" = data.frame(no_data = "No data loaded."),
              "passcheck" = F)
       }
     }
@@ -1020,8 +1058,16 @@ server <- function(input, output, session) {
         ggplotly(session$userData$spectra_explorer$sample_plot,dynamicTicks = T) %>% 
           plotly::config(modeBarButtons = list(list("zoom2d", "pan2d")),
                  displaylogo = FALSE)
-        
-        
+        })
+      output$sample_spectra_table <- renderDT({
+        datatable(
+          session$userData$spectra_explorer$sample_table,
+          caption = "mz | scaled response | raw response",
+          options = list(scrollX=T,
+                         dom = "t",
+                         paging = F)
+        )
+
       })
       
     })
