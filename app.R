@@ -1,34 +1,31 @@
 # Version 0!
+{
+  rm(list=ls())
+  library(tidyverse); options(dplyr.summarise.inform = FALSE)  # Data processing
+  library(cowplot); theme_set(theme_classic()) # Additional ggplot functionality
+  library(lemon) # Additional ggplot functionality
+  # library(zoo) # needed for na.locf function
+  library(writexl) # export the finished data
+  library(readxl) # import the template file
+  library(shinydashboard) # shiny
+  library(httr) # Needed for fetching URLs
+  library(DT) # tabular data is rendered via DT
+  library(shiny) # shiny
+  library(shinyFiles) # shiny file functionality
+  library(plotly) # interactive plots
+  library(admisc) # data wrangling, specifically the numdec function
+  library(fuzzyjoin) # data wrangling, fuzzy matching to help users with id1 entries
+  library(chromConverter) # read and convert MS data
+  library(stringi)
+}
 
-rm(list=ls())
-
-library(dplyr); options(dplyr.summarise.inform = FALSE) # Data processing
-library(ggplot2) # Data visualization
-library(cowplot); theme_set(theme_classic()) # Additional ggplot functionality
-library(lemon) # Additional ggplot functionality
-library(tidyr) # Data processing
-# library(zoo) # needed for na.locf function
-# library(lemon) # needed for facet_rep_wrap/grid functions
-library(writexl) # export the finished data
-library(readxl) # import the template file
-library(shinydashboard) # shiny
-library(httr) # Needed for fetching URLs
-library(DT) # tabular data is rendered via DT
-library(shiny) # shiny
-library(shinyFiles) # shiny file functionality
-library(plotly) # interactive plots
-library(stringr) # data wrangling
-# library(htmlwidgets)
-# library(shinyjs)
-# library(shinyWidgets)
-library(admisc) # data wrangling, specifically the numdec function
 
 {
   # install.packages("remotes")
   # remotes::install_github("https://github.com/ethanbass/chromConverter/")
 }
 
-library(chromConverter) # read and convert MS data
+
 
 # Peak finding/fitting functions lifted from Ethan Bass' chromatographR package. (https://ethanbass.github.io/chromatographR/)
 {
@@ -325,7 +322,7 @@ library(chromConverter) # read and convert MS data
 
 #testing
 {
-  gcms_template_file = "C:/Box/Konecky Lab/Data/Agilent GC-MS (Bradley Lab Cyborg)/pared_down_data/gcms_template.xlsx"
+  gcms_template_file = "C:/Box/Konecky Lab/Data/Agilent GC-MS (Bradley Lab Cyborg)/Sandro PAH Test Sequences/20250201/gcms_template.xlsx"
 }
 
 # UI
@@ -530,7 +527,6 @@ server <- function(input, output, session) {
         
         rm(files,filenames,raw_full,raw_sim)
       }
-      
       # Read and format metadata from the injection folders and template
       {
         # Get entered names for each injection
@@ -551,12 +547,27 @@ server <- function(input, output, session) {
           rm(files,filenames)
         }
         
+
+        
+        
         # Grab the standards off the template's sequence sheet, match against chemstation data, and format relevant metadata.
-        standard_info <- sequence %>% 
+        standard_info <- sequence %>% mutate(id1 = stri_replace_all_charclass(id1, "\\p{WHITE_SPACE}", " ")) %>% 
           mutate(id2 = suppressWarnings(as.numeric(id2))) %>% filter(!is.na(id2)) %>% 
+          unite(line_id1,c(line,id1),sep="_") %>%
+          stringdist_join(x = gcms_names %>% unite(line_id1,c(line,id1),sep="_"),
+                          y = .,
+                          by = c(line_id1 = "line_id1"),
+                          mode = "right",
+                          method = "jw",
+                          max_dist = 99,
+                          distance_col = "dist") %>% 
+          group_by(line_id1.y) %>% 
+          filter(dist == min(dist)) %>% 
+          ungroup() %>% 
+          rename(line_id1 = line_id1.y) %>% 
+          separate_wider_delim(line_id1,delim="_",names=c("line","id1")) %>% 
           mutate(dummy=T) %>% full_join(parameters %>% mutate(dummy=T),by="dummy") %>% 
           full_join(comp_list %>% mutate(dummy=T),by="dummy",relationship = "many-to-many") %>% 
-          left_join(gcms_names,by=c("line","id1")) %>% 
           select(line,injection,id1,id2,comp:mixed_stock_concentration,cal_curve_dilution_factor,cal_curve_volume,rfs_spike_volume,rt_window) %>% 
           mutate(total_volume = cal_curve_volume + rfs_spike_volume,
                  initial_concentration = mixed_stock_concentration * cal_curve_volume / total_volume,
@@ -567,11 +578,26 @@ server <- function(input, output, session) {
           )
         
         # Do the same thing for samples
-        sample_info <- sequence %>% filter(grepl("sample",id2)) %>% 
+        
+        sample_info <- sequence %>% mutate(id1 = stri_replace_all_charclass(id1, "\\p{WHITE_SPACE}", " ")) %>% 
+          filter(grepl("sample",id2)) %>% 
+          unite(line_id1,c(line,id1),sep="_") %>%
+          stringdist_join(x = gcms_names %>% unite(line_id1,c(line,id1),sep="_"),
+                          y = .,
+                          by = c(line_id1 = "line_id1"),
+                          mode = "right",
+                          method = "jw",
+                          max_dist = 99,
+                          distance_col = "dist") %>% 
+          group_by(line_id1.y) %>% 
+          filter(dist == min(dist)) %>% 
+          ungroup() %>% 
           mutate(dummy=T) %>% full_join(parameters %>% mutate(dummy=T),by="dummy") %>% 
-          left_join(gcms_names,by=c("line","id1")) %>% 
+          rename(line_id1 = line_id1.y) %>% 
+          separate_wider_delim(line_id1,delim="_",names=c("line","id1")) %>% 
           select(line,injection,id1:sample_mass_grams,rfs_spike_volume) %>% 
           mutate(total_volume = volume + rfs_spike_volume)
+
       }
       
       # Some simple summary info about our rawdata.
@@ -635,7 +661,7 @@ server <- function(input, output, session) {
         
       }
       
-      
+      browser()
       
       if(final_check){
         list("final_check" = final_check,
@@ -1065,6 +1091,7 @@ server <- function(input, output, session) {
           caption = "mz | scaled response | raw response",
           options = list(scrollX=T,
                          dom = "t",
+                         ordering = F,
                          paging = F)
         )
 
