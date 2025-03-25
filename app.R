@@ -26,6 +26,21 @@
 }
 
 
+# Custom formatted renderDT
+{
+  datatable_custom <- function(table_to_render){
+      datatable(
+        table_to_render,
+        class = 'cell-border stripe',
+        rownames = FALSE,
+        extensions = 'Buttons',
+        options = list(scrollX=T,
+                       dom = "Bt",
+                       buttons = list(list(extend="copy",title=NULL)),
+                       ordering = F,
+                       paging = F))
+  }
+}
 
 # Peak finding/fitting functions lifted from Ethan Bass' chromatographR package. (https://ethanbass.github.io/chromatographR/)
 {
@@ -322,13 +337,13 @@
 
 #testing
 {
-  gcms_template_file = "C:/Box/Konecky Lab/Data/Agilent GC-MS (Bradley Lab Cyborg)/Sandro PAH Test Sequences/20250201/gcms_template.xlsx"
+  gcms_template_file = "C:/Box/Konecky Lab/Data/Agilent GC-MS (Bradley Lab Cyborg)/march 2025 carana alkanes/gcms_template.xlsx"
 }
 
 # UI
 {
     ui <- dashboardPage(
-        skin = "green",
+        skin = "purple",
         dashboardHeader(title = "GC-MS Postprocessor"),
         dashboardSidebar(
             sidebarMenu(
@@ -350,13 +365,21 @@
                                 collapsed = T,
                                 uiOutput("introduction")),
                             box(title = "Select GC-MS template:",
-                                width=3,
+                                width=2,
                                 shinyFilesButton(id="gcms_template",
                                                  title="This must follow the structure of the original template! Do not delete any sheets!",
                                                  multiple=F,
                                                  label = "Browse...")),
-                            column(3,
+                            column(2,
                                 infoBoxOutput("gcms_template_status",width=12)),
+                            box(title = "Get Injection Names",
+                                width = 6,
+                                collapsible = T,
+                                shinyFilesButton(id="gcms_names_only",
+                                                 title="Select any file in a folder and fetch the injection names of all .D within that folder.",
+                                                 multiple=F,
+                                                 label="Browse..."),
+                                DTOutput("gcms_names_only_table")),
                             box(title = "Troubleshooting",
                                 width= 12,
                                 verbatimTextOutput("troubleshooting")),
@@ -496,12 +519,13 @@ server <- function(input, output, session) {
       {
         files <- list.files(path=dirname(gcms_template_file),pattern=".D",full.names=T)
         for(i in 1:length(files)){
-          if(!length(list.files(path=files[i],pattern="chrom_data.xlsx")) == 1)
+          if(!length(list.files(path=files[i],pattern="fullscan.csv")) == 1)
           {
             rawdata <- read_chroms(files[i],format_in=parameters$format_in,format_out="data.frame")
             fullscan <- rawdata[[1]]$MS1 %>% mutate(mz = round(mz,parameters$mz_digits)) %>% group_by(rt,mz) %>% summarize(intensity = sum(intensity))
             simscan <- rawdata[[2]]$MS1
-            write_xlsx(list("full"=fullscan,"sim"=simscan),path=paste0(files[i],"/chrom_data.xlsx"))
+            write.csv(fullscan,paste0(files[i],"/fullscan.csv"))
+            write.csv(simscan,paste0(files[i],"/simscan.csv"))
             rm(rawdata,fullscan,simscan)
           }
         }
@@ -510,14 +534,17 @@ server <- function(input, output, session) {
       
       # Read back in the converted excel files.
       {
-        files <- list.files(dirname(gcms_template_file),pattern="chrom_data.xlsx",recursive=T,full.names=T)
+        files <- list.files(dirname(gcms_template_file),pattern="fullscan.csv",recursive=T,full.names=T)
         filenames <- basename(dirname(files))
         
-        raw_full <- lapply(files,read_excel,sheet="full") # Read in files
+        raw_full <- lapply(files,read.csv) # Read in files
         raw_full <- setNames(raw_full,filenames) # Set injection name
         raw_full <- bind_rows(raw_full,.id="injection") # Convert to a single data.frame
         
-        raw_sim <- lapply(files,read_excel,sheet="sim")
+        files <- list.files(dirname(gcms_template_file),pattern="simscan.csv",recursive=T,full.names=T)
+        filenames <- basename(dirname(files))
+        
+        raw_sim <- lapply(files,read.csv)
         raw_sim <- setNames(raw_sim,filenames)
         raw_sim <- bind_rows(raw_sim,.id="injection")
         
@@ -527,6 +554,9 @@ server <- function(input, output, session) {
         
         rm(files,filenames,raw_full,raw_sim)
       }
+      
+      # browser()
+      
       # Read and format metadata from the injection folders and template
       {
         # Get entered names for each injection
@@ -535,17 +565,21 @@ server <- function(input, output, session) {
           filenames <- basename(dirname(files))
           
           gcms_names <- lapply(files,readLines) %>% 
+            lapply(.,as.data.frame) %>% 
             setNames(filenames) %>% 
             bind_rows(.id="injection") %>% 
-            gather(injection,runstart) %>% 
+            setNames(c("injection","runstart")) %>% 
             group_by(injection) %>% 
             filter(grepl("dataname",runstart) & !grepl("dataname2",runstart)) %>% 
             mutate(id1 = substr(runstart,gregexpr("= ",runstart)[[1]][1]+2,str_length(runstart))) %>% 
             select(-runstart) %>% 
-            mutate(line = as.numeric(substr(injection,gregexpr("_",injection)[[1]][1]+1,gregexpr(".D",injection)[[1]][1]-1)))
+            mutate(line = suppressWarnings(as.numeric(substr(injection,gregexpr("_",injection)[[1]][1]+1,gregexpr(".D",injection)[[1]][1]-1))),
+                   line = ifelse(is.na(line),as.numeric(substr(injection,gregexpr("_",injection)[[1]][1]+1,gregexpr("_",injection)[[1]][2]-1)),line))
           
           rm(files,filenames)
         }
+        
+        
         
 
         
@@ -575,7 +609,8 @@ server <- function(input, output, session) {
                  curve_concentration = initial_concentration * cal_curve_dilution_factor^id2,
                  window_lower = rt-rt_window,
                  window_upper = rt+rt_window
-          )
+          ) %>% 
+          type.convert(.,as.is=T)
         
         # Do the same thing for samples
         
@@ -596,7 +631,8 @@ server <- function(input, output, session) {
           rename(line_id1 = line_id1.y) %>% 
           separate_wider_delim(line_id1,delim="_",names=c("line","id1")) %>% 
           select(line,injection,id1:sample_mass_grams,rfs_spike_volume) %>% 
-          mutate(total_volume = volume + rfs_spike_volume)
+          mutate(total_volume = volume + rfs_spike_volume) %>% 
+          type.convert(.,as.is=T)
 
       }
       
@@ -609,7 +645,8 @@ server <- function(input, output, session) {
           filter(rt < min(rt)+2) %>% 
           group_by(scan_type,min_mz,max_mz) %>% 
           summarize(resolution = numdec(mz)) %>% 
-          mutate(mz_string = paste0(min_mz,"-",max_mz))
+          mutate(mz_string = paste0(min_mz,"-",max_mz)) %>% 
+          type.convert(.,as.is=T)
       }
       
       # Checks for problems
@@ -661,7 +698,7 @@ server <- function(input, output, session) {
         
       }
       
-      browser()
+
       
       if(final_check){
         list("final_check" = final_check,
@@ -679,6 +716,26 @@ server <- function(input, output, session) {
       }
     }
     
+    gcms_names_only_function <- function(gcms_template_file) {
+      
+        files <- list.files(dirname(gcms_template_file),pattern="runstart.txt",recursive=T,full.names=T)
+        filenames <- basename(dirname(files))
+        
+        gcms_names <- lapply(files,readLines) %>% 
+          lapply(.,as.data.frame) %>% 
+          setNames(filenames) %>% 
+          bind_rows(.id="injection") %>% 
+          setNames(c("injection","runstart")) %>% 
+          group_by(injection) %>% 
+          filter(grepl("dataname",runstart) & !grepl("dataname2",runstart)) %>% 
+          mutate(id1 = substr(runstart,gregexpr("= ",runstart)[[1]][1]+2,str_length(runstart))) %>% 
+          select(-runstart) %>% 
+          mutate(line = suppressWarnings(as.numeric(substr(injection,gregexpr("_",injection)[[1]][1]+1,gregexpr(".D",injection)[[1]][1]-1))),
+                 line = ifelse(is.na(line),as.numeric(substr(injection,gregexpr("_",injection)[[1]][1]+1,gregexpr("_",injection)[[1]][2]-1)),line))
+        
+        gcms_names
+    }
+    
     volumes = c("C"="C:/",getVolumes()())
     
     shinyFileChoose(input,
@@ -689,18 +746,30 @@ server <- function(input, output, session) {
                     session=session,
                     filetypes=c("xlsx"))
     
-    observe({
-      cat("\ninput$gcms_template value:\n\n")
-      print(input$gcms_template)
-    })
+    shinyFileChoose(input,
+                    id="gcms_names_only",
+                    roots=volumes,
+                    defaultRoot = "C",
+                    defaultPath = "/Box/Konecky Lab/Data/Agilent GC-MS (Bradley Lab Cyborg)",
+                    session=session)
     
-    
-    
+
     output$introduction <- renderUI({
       tagList(
         p("placeholder")
       )
     })
+    
+    gcms_names_only <- reactive({
+      if (length(parseFilePaths(volumes,input$gcms_names_only)$datapath) == 0) {
+        return(NULL)
+      } else {
+        gcms_names_only_function(parseFilePaths(volumes,input$gcms_names_only)$datapath)
+      }
+    })
+
+    output$gcms_names_only_table <- renderDT(datatable_custom(gcms_names_only()))
+
     
     ingest <- reactive({
       if (length(parseFilePaths(volumes,input$gcms_template)$datapath) == 0) {
@@ -719,12 +788,12 @@ server <- function(input, output, session) {
     output$troubleshooting <- renderPrint(parseFilePaths(volumes,input$gcms_template)$datapath)
     output$errors <-        renderPrint(ingest()$errors)
     output$raw_gcms_data <- renderDT(ingest()$rawdata,options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-    output$sample_info <-   renderDT(ingest()$sample_info,  options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-    output$standard_info <- renderDT(ingest()$standard_info,options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space: nowrap')
-    output$sequence <-      renderDT(ingest()$sequence,     options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-    output$comp_list <-     renderDT(ingest()$comp_list,    options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-    output$parameters <-    renderDT(ingest()$parameters,   options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
-    output$gcms_names <-    renderDT(ingest()$gcms_names,   options=list('lengthMenu'=JS('[[10,25,50,-1],[10,25,50,"All"]]'),searching=FALSE),class='white-space:nowrap')
+    output$sample_info <-   renderDT(datatable_custom(ingest()$sample_info))
+    output$standard_info <- renderDT(datatable_custom(ingest()$standard_info))
+    output$sequence <-      renderDT(datatable_custom(ingest()$sequence))
+    output$comp_list <-     renderDT(datatable_custom(ingest()$comp_list))
+    output$parameters <-    renderDT(datatable_custom(ingest()$parameters))
+    output$gcms_names <-    renderDT(datatable_custom(ingest()$gcms_names))
   }
        
   
@@ -838,7 +907,9 @@ server <- function(input, output, session) {
           mutate(scaled_intensity = total_intensity / max(total_intensity)) %>%
           group_by(mz) %>%
           summarize(mean_intensity = mean(scaled_intensity)) %>% 
-          arrange(mean_intensity)
+          arrange(mean_intensity) %>% 
+          mutate(base = 0) %>% 
+          gather(var,value,c(mean_intensity,base)) %>% select(-var)
         
         sample_spectral_data <- data.frame(injection_id1 = inj_sel) %>%
           separate_wider_delim(cols = injection_id1,delim = " | ",
@@ -863,9 +934,10 @@ server <- function(input, output, session) {
           ggplot(aes(x=mz,y=value,color=injection_label,group=injection_id1_mz)) +
           geom_line(position = position_dodge(width=0.5)) +
           scale_y_continuous(expand = expansion(mult = c(0,0.05))) +
+          theme(legend.position = "none") +
           labs(x="m/z",
                y="Response (arbs)",
-               color="Injection")
+               color=NULL)
         
         # browser()
         
@@ -886,6 +958,68 @@ server <- function(input, output, session) {
           select(injection_id1,ranked_vals,mz_scale_resp) %>% 
           spread(injection_id1,mz_scale_resp) %>% 
           select(-ranked_vals)
+        
+        full_spectrum = ungroup(sample_spectral_data) %>% 
+          select(injection_label) %>% distinct() %>% 
+          rowwise() %>% 
+          mutate(mz = list(seq(from = min(c(standard_spectral_data$mz,sample_spectral_data$mz)),
+                               to = max(c(standard_spectral_data$mz,sample_spectral_data$mz))))) %>% 
+          unnest(mz)
+        
+        diff_spectral_data <- sample_spectral_data %>% 
+          filter(intensity_type == "scaled_intensity") %>% 
+          ungroup() %>% 
+          select(mz,value,injection_label) %>% 
+          filter(value != 0) %>%
+          rename(sample = value) %>% 
+          group_by(injection_label) %>% 
+          mutate(sam_n = n()) %>% 
+          full_join(full_spectrum) %>% 
+          mutate(sample = ifelse(is.na(sample),0,sample)) %>% 
+          full_join(standard_spectral_data %>% 
+                      rename(standard = value) %>% 
+                      filter(standard != 0),
+                    by="mz") %>% 
+          gather(source,value,c(sample,standard)) %>% 
+          mutate(value = ifelse(is.na(value),0,value)) %>% 
+          spread(source,value) %>% 
+          group_by(injection_label) %>% 
+          mutate(F1_metric = sum((mz*sqrt(sample*standard))/sqrt(sum(mz*standard)*sum(mz*sample)))) %>% 
+          filter(sample >0 & standard >0) %>% 
+          mutate(i = 1:n()) %>% 
+          mutate(F2_coef = 1/n()) %>% 
+          rowwise() %>% 
+          mutate(F2_term_std = ifelse(i==1,NA,(standard / .$standard[which(.$injection_label == injection_label)][i-1])),
+                 F2_term_sam = ifelse(i==1,NA,(sample / .$sample[which(.$injection_label == injection_label)][i-1])),
+                 n = ifelse(F2_term_std > F2_term_sam,1,-1)) %>% 
+          mutate(F2_term_std = F2_term_std ^ n,
+                 F2_term_sam = F2_term_sam ^ -n) %>% 
+          mutate(F2_term = F2_term_std * F2_term_sam) %>% 
+          filter(!is.na(n)) %>% 
+          group_by(injection_label,F1_metric,sam_n) %>% 
+          summarize(F2_metric = F2_coef[1] * sum(F2_term),
+                    com_n = 1/F2_coef[1]) %>% 
+          mutate(MF = (1000 / (sam_n + com_n)) * (sam_n * F1_metric + com_n * F2_metric))
+
+        sample_spectral_data %>% 
+          filter(intensity_type == "scaled_intensity") %>% 
+          ggplot(aes(x=mz,y=value*100,color=injection_label,group=injection_id1_mz)) +
+            geom_line(position = position_dodge(width=0.5)) +
+            geom_line(data = standard_spectral_data,aes(x=mz,y=-value*100,group=mz),inherit.aes = F,color="black") +
+            geom_hline(aes(yintercept = 0),color="black",linetype = "dashed") +
+            scale_y_continuous(expand = expansion(mult = c(0,0.05))) +
+            theme(legend.position = "none") +
+            labs(x="m/z",
+                 y="Normalized Response",
+                 color=NULL)
+          
+
+
+        
+        
+        
+        
+        # browser()
 
         list("sample_plot" = sample_plot,
              "sample_table" = sample_table,
@@ -1082,7 +1216,7 @@ server <- function(input, output, session) {
       
       output$sample_spectra_plot <- renderPlotly({
         ggplotly(session$userData$spectra_explorer$sample_plot,dynamicTicks = T) %>% 
-          plotly::config(modeBarButtons = list(list("zoom2d", "pan2d")),
+          plotly::config(modeBarButtons = list(list("zoom2d")),
                  displaylogo = FALSE)
         })
       output$sample_spectra_table <- renderDT({
@@ -1092,9 +1226,9 @@ server <- function(input, output, session) {
           options = list(scrollX=T,
                          dom = "t",
                          ordering = F,
-                         paging = F)
-        )
-
+                         paging = F))
+      })
+      output$sample_standard_spectra_plot <- renderPlotly({
       })
       
     })
